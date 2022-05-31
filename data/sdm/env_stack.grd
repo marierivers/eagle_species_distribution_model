@@ -1,0 +1,25 @@
+[general]
+creator=R package 'raster'
+created=2022-05-30 22:11:38
+[georeference]
+nrows=513
+ncols=2120
+xmin=-162.333333333333
+ymin=24.8333333333333
+xmax=14.3333333333333
+ymax=67.5833333333333
+projection=+proj=longlat +datum=WGS84 +no_defs
+[data]
+datatype=FLT4S
+byteorder=little
+nbands=8
+bandorder=BIL
+minvalue=-89:-17.3999996185303:3.40000009536743:0:5.92999982833862:47:133.910003662109:0
+maxvalue=4507:25.1000003814697:21.2999992370605:369.959991455078:15.3100004196167:4620:1935.85998535156:97.3199996948242
+nodatavalue=-3.4e+38
+[legend]
+legendtype=
+values=
+color=
+[description]
+layername=WC_alt:WC_bio1:WC_bio2:ER_tri:ER_topoWet:WC_bio12:ER_annualPET:ER_aridityIndexThornthwaite

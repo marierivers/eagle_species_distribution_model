@@ -1,0 +1,458 @@
+---
+title: "Eagle Species Distribution Model"
+author: "Marie Rivers"
+date: '2022-05-31'
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+This analysis uses machine learning techniques to model the distribution of bald eagles (Haliaeetus leucocephalus) based on species observations from the Global Biodiversity Information Facility (GBIF.org) and environmental data.
+
+![Bald Eagle (Haliaeetus leucocephalus)](images/bald_eagle_img.jpeg){width=50%}
+
+# Setup
+```{r warning=FALSE}
+# load packages, installing if missing
+if (!require(librarian)){
+  install.packages("librarian")
+  library(librarian)
+}
+librarian::shelf(
+  dismo, dplyr, DT, ggplot2, here, htmltools, leaflet, mapview, purrr, raster, readr, rgbif, rgdal, rJava, sdmpredictors, sf, spocc, tidyr)
+select <- dplyr::select # overwrite raster::select
+options(readr.show_col_types = FALSE)
+```
+
+```{r}
+# set random seed for reproducibility
+set.seed(80)
+```
+
+```{r}
+# create directory to store data
+dir_data <- here("data/sdm")
+dir.create(dir_data, showWarnings = F, recursive = T)
+```
+
+# Get Species Observations
+```{r}
+obs_csv <- file.path(dir_data, "obs.csv")
+obs_geo <- file.path(dir_data, "obs.geojson")
+redo    <- FALSE 
+
+if (!file.exists(obs_geo) | redo){
+  # get species occurrence data from GBIF with coordinates
+  (res <- spocc::occ(
+    query = 'Haliaeetus leucocephalus', 
+    from = 'gbif', has_coords = T, limit = 10000
+    ))
+  
+  # extract data frame from result
+  df <- res$gbif$data[[1]] 
+  readr::write_csv(df, obs_csv)
+  
+  # convert to points of observation from lon/lat columns in data frame
+  obs <- df %>% 
+    sf::st_as_sf(
+      coords = c("longitude", "latitude"),
+      crs = st_crs(4326)) %>% 
+    select(prov, key, issues, basisOfRecord, occurrenceStatus, eventDate, isInCluster, lifeStage, locality, collectionCode, recordedBy, fieldNotes, eventTime, behavior, verbatimElevation, lifeStage, dateIdentified, stateProvince, verbatimLocality, occurrenceRemarks, identificationID, occurrenceRemarks, informationWithheld, identificationRemarks)
+  sf::write_sf(obs, obs_geo, delete_dsn=T)
+}
+obs <- sf::read_sf(obs_geo)
+nrow(obs) # number of rows
+```
+
+```{r}
+# check for observations with duplicate geometries
+duplicates <- sum(duplicated(obs$geometry))
+```
+
+This model limited the number of observations to 10,000. The `unique()` function was used to check for odd observations. For all observations, the `basisOfrecord` was "human_observation". The `issues` and `occurrenceRemarks` fields didn't not have any concerning entries. The `occurrenceStatus` was "present" for all observations. Observations with duplicate geometries (`r duplicates`) were kept because these records likely indicate mated pairs. While eagles can be found in a variety of habitats, they only build nests in the most desirable locations and therefor these important observations were retained for the analysis. 
+
+This map shows the distribution of bald eagle observations.
+```{r}
+# show points on map
+mapview::mapview(obs, map.types = "Esri.WorldPhysical")
+```
+
+# Get Environmental Data
+```{r}
+dir_env <- file.path(dir_data, "env")
+
+# set a default data directory
+options(sdmpredictors_datadir = dir_env)
+
+# choosing terrestrial
+env_datasets <- sdmpredictors::list_datasets(terrestrial = TRUE, marine = FALSE)
+
+# show table of datasets
+env_datasets %>% 
+  select(dataset_code, description, citation) %>% 
+  DT::datatable()
+```
+
+```{r}
+# choose datasets for a vector
+env_datasets_vec <- c("WorldClim", "ENVIREM")
+
+# get layers
+env_layers <- sdmpredictors::list_layers(env_datasets_vec)
+DT::datatable(env_layers)
+```
+
+Based on the literature, bald eagles prefer habits near wetlands and open bodies of water with abundance fish such as seacoasts, rivers, lakes, and marshes. Eagles also prefer trees near water, particularly old growth and mature stands of coniferous or hardwood trees. Eagles can live in a wide range of temperatures.
+
+The environmental predictors selected for this analysis included: altitude, annual mean temperature, mean diurnal temperature range, terrain roughness index, topographic wetness, annual precipitation, annual potential evapotranspiration, and the Thornthwaite aridity index which is an index of the degree of water deficit below water need.
+
+Other potentially useful predictors that were not available for the WorldClim or ENVIREM data sets include forested area and proximity to low/medium/high density populations of humans.
+```{r}
+# choosen layers after consulting literature
+env_layers_vec <- c("WC_alt", "WC_bio1", "WC_bio2", "ER_tri", "ER_topoWet", "WC_bio12", "ER_annualPET", "ER_aridityIndexThornthwaite")
+
+# get layers
+env_stack <- load_layers(env_layers_vec)
+# plot layers
+plot(env_stack, nc=2)
+```
+
+```{r}
+# crop the environmental rasters to a reasonable study area around the species observations
+obs_hull_geo  <- file.path(dir_data, "obs_hull.geojson")
+env_stack_grd <- file.path(dir_data, "env_stack.grd")
+
+if (!file.exists(obs_hull_geo) | redo){
+  # make convex hull around points of observation
+  obs_hull <- sf::st_convex_hull(st_union(obs))
+  
+  # save obs hull
+  write_sf(obs_hull, obs_hull_geo)
+}
+obs_hull <- read_sf(obs_hull_geo)
+
+# show points on map
+mapview(
+  list(obs, obs_hull))
+```
+
+Plots of environmental raster layers clipped to the bald eagle range
+```{r}
+if (!file.exists(env_stack_grd) | redo){
+  obs_hull_sp <- sf::as_Spatial(obs_hull)
+  env_stack <- raster::mask(env_stack, obs_hull_sp) %>% 
+    raster::crop(extent(obs_hull_sp))
+  writeRaster(env_stack, env_stack_grd, overwrite=T)  
+}
+env_stack <- stack(env_stack_grd)
+
+plot(env_stack, nc=2)
+```
+
+# Pseudo-Absence
+```{r}
+absence_geo <- file.path(dir_data, "absence.geojson")
+pts_geo     <- file.path(dir_data, "pts.geojson")
+pts_env_csv <- file.path(dir_data, "pts_env.csv")
+
+if (!file.exists(absence_geo) | redo){
+  # get raster count of observations
+  r_obs <- rasterize(
+    sf::as_Spatial(obs), env_stack[[1]], field=1, fun='count')
+  
+  # create mask for 
+  r_mask <- mask(env_stack[[1]] > -Inf, r_obs, inverse=T)
+  
+  # generate random points inside mask
+  absence <- dismo::randomPoints(r_mask, nrow(obs)) %>% 
+    as_tibble() %>% 
+    st_as_sf(coords = c("x", "y"), crs = 4326)
+  
+  write_sf(absence, absence_geo, delete_dsn=T)
+}
+absence <- read_sf(absence_geo)
+
+# show map of presence, ie obs, and absence
+mapview(obs, col.regions = "green", cex = 0.75) +
+  mapview(absence, col.regions = "gray", cex = 0.25)
+```
+
+```{r}
+if (!file.exists(pts_env_csv) | redo){
+
+  # combine presence and absence into single set of labeled points 
+  pts <- rbind(
+    obs %>% 
+      mutate(
+        present = 1) %>% 
+      select(present, key),
+    absence %>% 
+      mutate(
+        present = 0,
+        key     = NA)) %>% 
+    mutate(
+      ID = 1:n()) %>% 
+    relocate(ID)
+  write_sf(pts, pts_geo, delete_dsn=T)
+
+  # extract raster values for points
+  pts_env <- raster::extract(env_stack, as_Spatial(pts), df=TRUE) %>% 
+    tibble() %>% 
+    # join present and geometry columns to raster value results for points
+    left_join(
+      pts %>% 
+        select(ID, present),
+      by = "ID") %>% 
+    relocate(present, .after = ID) %>% 
+    # extract lon, lat as single columns
+    mutate(
+      #present = factor(present),
+      lon = st_coordinates(geometry)[,1],
+      lat = st_coordinates(geometry)[,2]) %>% 
+    select(-geometry)
+  write_csv(pts_env, pts_env_csv)
+}
+pts_env <- read_csv(pts_env_csv)
+
+pts_env %>% 
+  # show first 10 presence, last 10 absence
+  slice(c(1:10, (nrow(pts_env)-9):nrow(pts_env))) %>% 
+  DT::datatable(
+    rownames = F,
+    options = list(
+      dom = "t",
+      pageLength = 20))
+```
+
+```{r}
+# check that all presence and absence points are included
+nrow(pts_env)
+```
+
+# Term Plots
+The term plots display predictors and responses. For modeling purposes, predictors are preferred where presence occupies a distinct niche from the background absence points. The term plots are a good way visualize how differentiated presence is from absence for each predictor.
+```{r}
+pts_env %>% 
+  select(-ID) %>% 
+  mutate(
+    present = factor(present)) %>% 
+  pivot_longer(-present) %>% 
+  ggplot() +
+  geom_density(aes(x = value, fill = present)) + 
+  scale_fill_manual(values = alpha(c("gray", "green"), 0.5)) +
+  scale_x_continuous(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  theme_bw() + 
+  facet_wrap(~name, scales = "free") +
+  theme(
+    legend.position = c(1, 0),
+    legend.justification = c(1, 0))
+```
+
+Based on the results of Term Plots, topographic wetness (ER_topoWet) and terrain roughness index (ER_tri) are similarly distributed for presence and absence points and are therefore likely not strong predictors for a bald eagle species distribution model. The term plots suggest that annual mean temperature (WC_bio1), annual precipitation (WC_bio12), and annual potential evapotranspiration (ER_annualPET) could be useful predictors of bald eagle species distribution.
+
+# Maxent (Maximum Entropy)
+Maxent is a commonly used species distribution model that performs well with few input data points and only requires presence points. Since this model only has presence points, it samples the background for comparison.
+```{r warning=FALSE}
+# load extra packages
+librarian::shelf(
+  maptools, sf)
+
+mdl_maxent_rds <- file.path(dir_data, "mdl_maxent.rds")
+
+# show version of maxent
+if (!interactive())
+  maxent()
+```
+
+```{r}
+env_stack_grd <- file.path(dir_data, "env_stack.grd")
+env_stack <- stack(env_stack_grd)
+plot(env_stack, nc=2)
+```
+
+```{r}
+# get the presence-only observation points (maxent extracts raster values for you)
+obs_geo <- file.path(dir_data, "obs.geojson")
+obs_sp <- read_sf(obs_geo) %>%
+  sf::as_Spatial() # maxent prefers sp::SpatialPoints over newer sf::sf class
+```
+
+```{r}
+# fit a maxent entropy model
+if (!file.exists(mdl_maxent_rds)){
+  mdl_maxent <- maxent(env_stack, obs_sp)
+  readr::write_rds(mdl_maxent, mdl_maxent_rds)
+}
+mdl_maxent <- read_rds(mdl_maxent_rds)
+```
+
+```{r}
+# plot variable contributions per predictor
+plot(mdl_maxent)
+```
+
+```{r}
+# plot term plots
+response(mdl_maxent)
+```
+
+WC_bio1 contributes most to the Maxent predictions.
+
+```{r}
+# predict
+y_predict_maxent <- predict(env_stack, mdl_maxent) #, ext=ext, progress='')
+
+plot(y_predict_maxent, main='Maxent, raw prediction')
+data(wrld_simpl, package = "maptools")
+plot(wrld_simpl, add=TRUE, border='dark grey')
+```
+```{r}
+# paths
+mdl_maxv_rds <- file.path(dir_data, "mdl_maxent_vif.rds")
+```
+Based on the results of the Maxent model, mean annual temperature (WC_bio1) contributes most towards predicting presences, followed by altitude (WC_alt). 
+
+# Evaluate: Model Performance 
+```{r}
+librarian::shelf(usdm) # uncertainty analysis for species distribution models: vifcor()
+```
+
+```{r}
+# read points of observation: presence (1) and absence (0)
+pts <- read_sf(pts_geo)
+
+# read raster stack of environment
+env_stack < raster::stack(env_stack_grd)
+```
+## Split observations into training and testing
+```{r}
+pts_split <- rsample::initial_split(
+  pts, prop = 0.8, strata = "present")
+pts_train <- rsample::training(pts_split)
+pts_test <- rsample::testing(pts_split)
+
+pts_train_p <- pts_train %>%
+  filter(present == 1) %>%
+  as_Spatial()
+pts_train_a <- pts_train %>%
+  filter(present == 0) %>%
+  as_Spatial()
+```
+
+# Calibrate: Model Selection
+```{r}
+# calculate variance inflation factor per predictor, a metric of multicollinearity between variables
+vif(env_stack)
+```
+
+```{r}
+# stepwise reduce predictors based on a max correlation of 0.7 (max 1)
+v <- vifcor(env_stack, th=0.7)
+v
+```
+2 variables from the 8 input variables (ER_annualPET and ER_tri ) have collinearity problem and were excluded.
+
+After excluding the collinear variables, the linear correlation coefficients ranges between: 
+
+min correlation ( WC_bio1 ~ WC_alt ):  -0.001771876 
+
+max correlation ( ER_aridityIndexThornthwaite ~ WC_bio12 ):  -0.6641443 
+ 
+```{r}
+# reduce environmental raster stack to remove collinearity problems
+env_stack_v <- usdm::exclude(env_stack, v)
+
+# show pairs plot after multicollinearity reduction with vifcor()
+pairs(env_stack_v)
+```
+
+```{r}
+# fit a maximum entropy model
+if(!file.exists(mdl_maxv_rds)){
+  mdl_maxv <- maxent(env_stack_v, sf::as_Spatial(pts_train))
+  readr::write_rds(mdl_maxv, mdl_maxv_rds)
+}
+mdl_maxv <- read_rds(mdl_maxv_rds)
+```
+
+```{r}
+# plot variable contributions per predictor
+plot(mdl_maxv)
+```
+
+The most important remaining variable is annual mean temperature (WC_bio1) followed by altitude (WC_alt), mean diurnal temperature range (WC_bio2), then topographic wetness (ER_topoWet).
+
+```{r}
+# plot term plots
+response(mdl_maxv)
+```
+
+# Evaluate: Model Performance
+## Area Under the Curve (AUC), Reciever Operater Characteristic (ROC) Curve and Confustion Matrix
+```{r}
+pts_test_p <- pts_test %>% 
+  filter(present == 1) %>% 
+  as_Spatial()
+pts_test_a <- pts_test %>% 
+  filter(present == 0) %>% 
+  as_Spatial()
+
+y_maxv <- predict(mdl_maxv, env_stack)
+
+
+e <- dismo::evaluate(
+  p = pts_test_p,
+  a = pts_test_a,
+  model = mdl_maxv,
+  x = env_stack)
+e
+```
+
+```{r}
+plot(e, 'ROC')
+```
+
+```{r}
+thr <- threshold(e)[['spec_sens']]
+thr
+```
+
+```{r}
+p_true <- na.omit(raster::extract(y_maxv, pts_test_p) >= thr)
+a_true <- na.omit(raster::extract(y_maxv, pts_test_a) < thr)
+```
+
+```{r}
+# (t)rue/(f)alse (p)positve/(n)negative rates
+tpr <- sum(p_true)/length(p_true)
+fnr <- sum(!p_true)/length(p_true)
+fpr <- sum(!a_true)/length(a_true)
+tnr <- sum(a_true)/length(a_true)
+```
+
+```{r}
+matrix(
+  c(tpr, fnr, fpr, tnr),
+  nrow=2, dimnames = list(
+    c('present_obs', 'absent_obs'),
+    c('present_pred', 'absent_pred')))
+```
+The true positive rate = `r tpr`
+The true negative rate = `r tnr`
+The false positive rate = `r fpr`
+The false negative rate = `r fnr`
+
+```{r}
+# add point to ROC plot
+plot(e, 'ROC')
+points(fpr, tpr, pch=23, bg='blue')
+```
+
+```{r}
+plot(y_maxv > thr)
+```

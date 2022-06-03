@@ -11,7 +11,7 @@ output:
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 ```
 
-This analysis uses machine learning techniques to model the distribution of bald eagles (Haliaeetus leucocephalus) based on species observations from the Global Biodiversity Information Facility (GBIF.org) and environmental data.
+This analysis uses the Maxent machine learning technique to model the distribution of bald eagles (Haliaeetus leucocephalus) based on species observations from the Global Biodiversity Information Facility (GBIF.org) and environmental data.
 
 ![Bald Eagle (Haliaeetus leucocephalus)](images/bald_eagle_img.jpeg){width=50%}
 
@@ -256,7 +256,7 @@ pts_env %>%
 Based on the results of Term Plots, topographic wetness (ER_topoWet) and terrain roughness index (ER_tri) are similarly distributed for presence and absence points and are therefore likely not strong predictors for a bald eagle species distribution model. The term plots suggest that annual mean temperature (WC_bio1), annual precipitation (WC_bio12), and annual potential evapotranspiration (ER_annualPET) could be useful predictors of bald eagle species distribution.
 
 # Maxent (Maximum Entropy)
-Maxent is a commonly used species distribution model that performs well with few input data points and only requires presence points. Since this model only has presence points, it samples the background for comparison.
+Maxent is a commonly used species distribution model that performs well with few input data points and only requires presence points (background 'absence' points generated during the analysis). Since this example only has presence points, the background is sampled for comparison.
 ```{r warning=FALSE}
 # load extra packages
 librarian::shelf(
@@ -414,10 +414,6 @@ e
 ```
 
 ```{r}
-plot(e, 'ROC')
-```
-
-```{r}
 thr <- threshold(e)[['spec_sens']]
 thr
 ```
@@ -428,7 +424,7 @@ a_true <- na.omit(raster::extract(y_maxv, pts_test_a) < thr)
 ```
 
 ```{r}
-# (t)rue/(f)alse (p)positve/(n)negative rates
+# true/false positive/negative rates
 tpr <- sum(p_true)/length(p_true)
 fnr <- sum(!p_true)/length(p_true)
 fpr <- sum(!a_true)/length(a_true)
@@ -442,16 +438,18 @@ matrix(
     c('present_obs', 'absent_obs'),
     c('present_pred', 'absent_pred')))
 ```
-The true positive rate = `r tpr`
-The true negative rate = `r tnr`
-The false positive rate = `r fpr`
-The false negative rate = `r fnr`
+The true positive rate = `r round(tpr * 100, 2)`%  
+The true negative rate = `r round(tnr * 100, 2)`%  
+The false positive rate = `r round(fpr * 100, 2)`%  
+The false negative rate = `r round(fnr * 100, 2)`%  
 
 ```{r}
 # add point to ROC plot
 plot(e, 'ROC')
 points(fpr, tpr, pch=23, bg='blue')
 ```
+
+The Receiver Operator Characteristic (ROC) graph plots the specificity (false positive rate) vs. the sensitivity (true positive rate). Here the diagonal line represents a model that is no better than random guessing. The objective is to maximize the Area Under the Curve (AUC).
 
 ```{r}
 plot(y_maxv > thr)
